@@ -38,6 +38,7 @@ const warrantyRoutes = require("./src/routes/warrantyRoutes");
 const statsRoutes = require("./src/routes/statsRoutes");
 const seoRoutes = require("./src/routes/seoRoutes");
 const heroSectionRoutes = require("./src/routes/heroSectoinRoutes");
+const dimeRoutes = require("./src/routes/dimeRoutes");
 
 
 
@@ -111,6 +112,7 @@ app.use("/api", heroSectionRoutes);
 
 app.use("/api", orderRoutes);
 app.use("/api", warrantyRoutes);
+app.use("/api", dimeRoutes);
 
 
 
