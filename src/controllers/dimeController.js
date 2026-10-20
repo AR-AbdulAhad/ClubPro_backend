@@ -2,6 +2,7 @@ const { PrismaClient } = require("@prisma/client");
 const axios = require("axios");
 const querystring = require("querystring");
 const { sendClubProOrderWebhook } = require("../utils/clubProWebhook");
+const fishbowl = require("../services/fishbowlService");
 
 const prisma = new PrismaClient();
 
@@ -165,14 +166,14 @@ exports.dimeCharge = async (req, res) => {
             shipmentStatus: "UNKNOWN",
             shipFirstName,
             shipLastName,
-            shipAddress1:   shipAddr.address1 || customer.commercialStreet || null,
+            shipAddress1:   shipAddr.address1 || customer.commercialStreet || customer.billingStreet || null,
             shipAddress2:   shipAddr.address2 || null,
-            shipCity:       shipAddr.city     || customer.commercialCity    || null,
-            shipState:      shipAddr.state    || customer.commercialState   || null,
-            shipZip:        shipAddr.zip      || customer.commercialZip     || null,
-            shipCountry:    shipAddr.country  || customer.commercialCountry || null,
+            shipCity:       shipAddr.city     || customer.commercialCity    || customer.billingCity    || null,
+            shipState:      shipAddr.state    || customer.commercialState   || customer.billingState   || null,
+            shipZip:        shipAddr.zip      || customer.commercialZip     || customer.billingZip     || null,
+            shipCountry:    shipAddr.country  || customer.commercialCountry || customer.billingCountry || null,
             shipEmail:      customer.email,
-            shipPhone:      customer.phone    || null,
+            shipPhone:      shipAddr.phone    || customer.phone             || null,
             items: {
               create: parsedItems.map((item) => ({
                 productId:    Number(item.id),
@@ -257,6 +258,17 @@ exports.dimeCharge = async (req, res) => {
         transactionId,
       });
     }
+
+    // 4. Fishbowl Sync: Create Sales Order for FedEx Ship Manager & UPS WorldShip
+    fishbowl.syncSalesOrder({
+      order,
+      customer,
+      items: parsedItems,
+      shippingAddress: shipAddr,
+      billingAddress,
+    }).catch((fbErr) => {
+      console.error("[Fishbowl] Dime order sync error:", fbErr.message);
+    });
 
     return res.json({
       success: true,

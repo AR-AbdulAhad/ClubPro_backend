@@ -6,11 +6,9 @@ const sendEmail = require("../utils/sendEmail");
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Shippo
-const { Shippo } = require("shippo");
-const shippo = new Shippo({
-  apiKeyHeader: process.env.SHIPPO_API_KEY,
-});
+// Services
+const fishbowl = require("../services/fishbowlService");
+const shippingService = require("../services/shippingService");
 
 const prisma = new PrismaClient();
 
@@ -82,10 +80,14 @@ exports.stripeWebhook = async (req, res) => {
     console.log("Parsed items from metadata:", JSON.stringify(items, null, 2));
     console.log("Shipping cost:", shippingCost, "| serviceLevel:", serviceLevel, "| serviceName:", serviceName);
 
-    // Prefer the shipping address entered on Stripe's hosted page; fall back to the billing/customer address
+    let shipMeta = {};
+    try {
+      if (session.metadata?.shippingAddress) shipMeta = JSON.parse(session.metadata.shippingAddress);
+    } catch {}
+
+    // Prefer the shipping address entered on Checkout page / metadata; fall back to Stripe details & customer profile
     const shipSource = session.shipping_details || session.customer_details || {};
     const shipAddr = shipSource.address || {};
-    const { firstName: shipFirstName, lastName: shipLastName } = splitName(shipSource.name);
 
     // customer_details is what Stripe collected via billing_address_collection: "required"
     const billSource = session.customer_details || {};
@@ -102,6 +104,18 @@ exports.stripeWebhook = async (req, res) => {
           throw new Error("Customer not found");
         }
 
+        const { firstName: shipFirstName, lastName: shipLastName } = splitName(
+          shipMeta.fullName || shipSource.name || customer.fullName
+        );
+
+        const shipAddress1 = shipMeta.address1 || shipAddr.line1 || customer.commercialStreet || customer.billingStreet || null;
+        const shipAddress2 = shipMeta.address2 || shipAddr.line2 || null;
+        const shipCity     = shipMeta.city     || shipAddr.city || customer.commercialCity || customer.billingCity || null;
+        const shipState    = shipMeta.state    || shipAddr.state || customer.commercialState || customer.billingState || null;
+        const shipZip      = shipMeta.zip      || shipAddr.postal_code || customer.commercialZip || customer.billingZip || null;
+        const shipCountry  = shipMeta.country  || shipAddr.country || customer.commercialCountry || customer.billingCountry || null;
+        const shipPhone    = shipMeta.phone    || session.customer_details?.phone || customer.phone || null;
+
         // 1. Create order in Prisma (so it immediately displays in Admin Dashboard)
         const order = await tx.order.create({
           data: {
@@ -112,14 +126,14 @@ exports.stripeWebhook = async (req, res) => {
             shipmentStatus: "UNKNOWN",
             shipFirstName,
             shipLastName,
-            shipAddress1: shipAddr.line1 || null,
-            shipAddress2: shipAddr.line2 || null,
-            shipCity: shipAddr.city || null,
-            shipState: shipAddr.state || null,
-            shipZip: shipAddr.postal_code || null,
-            shipCountry: shipAddr.country || null,
-            shipEmail: session.customer_details?.email || null,
-            shipPhone: session.customer_details?.phone || null,
+            shipAddress1,
+            shipAddress2,
+            shipCity,
+            shipState,
+            shipZip,
+            shipCountry,
+            shipEmail: session.customer_details?.email || customer.email,
+            shipPhone,
             items: {
               create: items.map((item) => ({
                 productId: item.id,
@@ -207,144 +221,18 @@ exports.stripeWebhook = async (req, res) => {
           });
         }
 
-        /*
-        // ─── Fishbowl Sync commented out per request ───
-        let fbCustomerNum = customer.fishbowlCustomerNumber;
-        if (!fbCustomerNum) {
-          try {
-            const custCSV = `CustomerName,BillingAddress,BillingCity,BillingState,BillingZip,BillingCountry,Email\n"${customer.fullName}","${customer.billingStreet || customer.commercialStreet}","${customer.billingCity || customer.commercialCity}","${customer.billingState || customer.commercialState}","${customer.billingZip || customer.commercialZip}","${customer.billingCountry || customer.commercialCountry}","${customer.email}"`;
-
-            await fishbowl.importCustomer(custCSV);
-            fbCustomerNum = customer.email;
-
-            await tx.customers.update({
-              where: { id: customer.id },
-              data: { fishbowlCustomerNumber: fbCustomerNum },
-            });
-          } catch (fbErr) {
-            console.error("Fishbowl customer sync failed:", fbErr);
-          }
-        }
-        */
-
-        // B. Create Sales Order in Fishbowl — disabled along with the rest
-        // of the Fishbowl sync above (see comment at the top of this file).
-        /*
+        // 4. Fishbowl Sync: Create Sales Order for FedEx Ship Manager & WorldShip
         try {
-          let soCSV = `SONum,CustomerName,ItemNumber,Quantity,Price,UOM,LocationGroup,SOType,Date\n"#${order.id}","${fbCustomerNum}"`;
-
-          for (const item of order.items) {
-            const product = await tx.product.findUnique({
-              where: { id: item.productId },
-            });
-
-            if (!product.fishbowlPartNumber) {
-              throw new Error(`Product ${product.name} not synced to Fishbowl`);
-            }
-
-            soCSV += `\n"${product.fishbowlPartNumber}",${item.quantity},${item.priceAtOrder},"Each","Main","Standard","${new Date().toISOString().split('T')[0]}"`;
-          }
-
-          await fishbowl.importSalesOrder(soCSV);
-
-          await tx.order.update({
-            where: { id: order.id },
-            data: { fishbowlSalesOrderNumber: `#${order.id}` },
+          await fishbowl.syncSalesOrder({
+            order,
+            customer,
+            items,
+            shippingAddress: shipMeta,
+            billingAddress: billAddr,
           });
-
-          console.log(`Fishbowl Sales Order created: #${order.id}`);
         } catch (fbErr) {
-          console.error("Fishbowl Sales Order creation failed:", fbErr);
+          console.error("Fishbowl order sync failed:", fbErr.message);
         }
-        */
-
-        // 4. Shippo Order (label/tracking creation) — disabled per user
-        // request. Shipping-cost calculation at checkout (stripeSession)
-        // stays active; this was only the post-payment label/order sync.
-        /*
-        try {
-        const products = await tx.product.findMany({
-          where: { id: { in: items.map((i) => i.id) } },
-        });
-
-        if (products.length !== items.length) {
-          throw new Error("One or more products missing");
-        }
-
-        const addressFrom = {
-          name: "Test Store Inc",
-          company: "Your Company Name",
-          street1: "123 Test Street",
-          street2: "",
-          city: "San Francisco",
-          state: "CA",
-          zip: "94105",
-          country: "US",
-          phone: "+14155551234",
-          email: "support@yourstore.com",
-          is_residential: false,
-        };
-
-        const addressTo = {
-          name: customer.fullName || "Customer",
-          street1: customer.commercialStreet || customer.billingStreet,
-          street2: "",
-          city: customer.commercialCity || customer.billingCity,
-          state: customer.commercialState || customer.billingState,
-          zip: customer.commercialZip || customer.billingZip,
-          country: customer.commercialCountry || customer.billingCountry || "US",
-          phone: "",
-          email: customer.email,
-          is_residential: true,
-        };
-
-        const subtotal = items.reduce((acc, i) => acc + i.price * i.qty, 0);
-
-        const shippoLineItems = items.map((item) => {
-          const product = products.find((p) => p.id === item.id);
-          return {
-            title: product.name,
-            variantTitle: product.color || "",
-            sku: product.sku || "",
-            quantity: item.qty,
-            totalPrice: (item.price * item.qty).toFixed(2),
-            currency: "USD",
-            weight: product.weightLb.toString(),
-            weightUnit: "lb",
-            manufactureCountry: "US",
-          };
-        });
-
-        let orderWeightLb = 0;
-        for (const item of items) {
-          const product = products.find((p) => p.id === item.id);
-          orderWeightLb += Number(product.weightLb) * item.qty;
-        }
-        orderWeightLb = Math.max(orderWeightLb, 0.5);
-
-        const shippoOrder = await shippo.orders.create({
-          orderNumber: `#${order.id}`,
-          orderStatus: "PAID",
-          weight: orderWeightLb.toString(),
-          weightUnit: "lb",
-          fromAddress: addressFrom,
-          toAddress: addressTo,
-          lineItems: shippoLineItems,
-          subtotalPrice: subtotal.toFixed(2),
-          totalPrice: (session.amount_total / 100).toFixed(2),
-          totalTax: "0.00",
-          currency: "USD",
-          shippingCost: shippingCost.toFixed(2),
-          shippingCostCurrency: "USD",
-          shippingMethod: serviceName,
-          placedAt: new Date().toISOString(),
-        });
-
-        console.log('Shippo Order created:', shippoOrder.objectId);
-        } catch (shippoErr) {
-          console.error("Shippo order creation failed:", shippoErr);
-        }
-        */
       }, { timeout: 30000 }); // Increased timeout for Fishbowl API calls
     } catch (err) {
       console.error("Critical error in webhook processing:", err);
@@ -371,7 +259,7 @@ exports.stripeSession = async (req, res) => {
       return res.status(400).json({ message: "Missing or invalid items" });
     }
 
-    const { items: rawItems } = req.body;
+    const { items: rawItems, shippingAddress = {}, billingAddress = {} } = req.body;
     const items = rawItems.map((item) => ({
       ...item,
       qty: Math.max(1, Number(item.qty || item.quantity || item.count || 1)),
@@ -408,81 +296,37 @@ exports.stripeSession = async (req, res) => {
       }
     }
 
-    // ─── Parcel calculation for Shippo ───
-    let totalWeightLb = 0;
-    let maxLengthIn = 0;
-    let maxWidthIn = 0;
-    let totalHeightIn = 0;
-
-    for (const item of items) {
-      const product = products.find((p) => p.id === Number(item.id));
-      totalWeightLb += Number(product.weightLb || 1) * item.qty;
-      maxLengthIn = Math.max(maxLengthIn, Number(product.lengthIn || 5));
-      maxWidthIn = Math.max(maxWidthIn, Number(product.widthIn || 5));
-      totalHeightIn += Number(product.heightIn || 5) * item.qty;
-    }
-
-    totalWeightLb = Math.max(0.5, totalWeightLb);
-    maxLengthIn = Math.max(5, maxLengthIn);
-    maxWidthIn = Math.max(5, maxWidthIn);
-    totalHeightIn = Math.max(5, totalHeightIn);
-
-    const parcel = {
-      weight: totalWeightLb.toFixed(2),
-      massUnit: "lb",
-      length: maxLengthIn.toFixed(2),
-      width: maxWidthIn.toFixed(2),
-      height: totalHeightIn.toFixed(2),
-      distanceUnit: "in",
-    };
-
-    const addressFrom = {
-      name: "Test Store Inc",
-      company: "Your Company Name",
-      street1: "123 Test Street",
-      street2: "",
-      city: "San Francisco",
-      state: "CA",
-      zip: "94105",
-      country: "US",
-      phone: "+14155551234",
-      email: "support@yourstore.com",
-      is_residential: false,
-    };
-
-    const addressTo = {
-      name: customer.fullName || "Customer",
-      street1: customer.commercialStreet || customer.billingStreet || "123 Main St",
-      street2: "",
-      city: customer.commercialCity || customer.billingCity || "City",
-      state: customer.commercialState || customer.billingState || "CA",
-      zip: customer.commercialZip || customer.billingZip || "90001",
-      country: customer.commercialCountry || customer.billingCountry || "US",
-      phone: "",
-      email: customer.email,
-      is_residential: true,
-    };
-
+    // ─── Unified Rate Calculation (UPS Live Rates for US, Larimar for Int'l) ───
     let shippingCost = 0;
     let selectedRate = null;
 
     try {
-      const shipment = await shippo.shipments.create({
-        addressFrom,
-        addressTo,
-        parcels: [parcel],
-        async: false,
+      const rateResult = await shippingService.calculateRate({
+        items,
+        shippingAddress: {
+          fullName: shippingAddress.fullName || customer.fullName || "Customer",
+          address1: shippingAddress.address1 || customer.commercialStreet || customer.billingStreet || "123 Main St",
+          address2: shippingAddress.address2 || "",
+          city: shippingAddress.city || customer.commercialCity || customer.billingCity || "City",
+          state: shippingAddress.state || customer.commercialState || customer.billingState || "CA",
+          zip: shippingAddress.zip || customer.commercialZip || customer.billingZip || "90001",
+          country: shippingAddress.country || customer.commercialCountry || customer.billingCountry || "US",
+          phone: shippingAddress.phone || customer.phone || "",
+        },
       });
 
-      if (shipment.rates && shipment.rates.length > 0) {
-        selectedRate = shipment.rates.reduce((prev, curr) =>
-          parseFloat(prev.amount) < parseFloat(curr.amount) ? prev : curr
-        );
-        shippingCost = parseFloat(selectedRate.amount);
+      if (rateResult && rateResult.cost >= 0) {
+        shippingCost = rateResult.cost;
+        selectedRate = {
+          servicelevel: {
+            token: rateResult.serviceCode || (rateResult.isInternational ? "INTL" : "UPS_GROUND"),
+            name: rateResult.serviceName || "Standard Shipping",
+          },
+          amount: shippingCost,
+        };
       }
-    } catch (shippoErr) {
-      console.error("Shippo rate calculation failed (invalid address?):", shippoErr.message);
-      // Fallback: $0 shipping — admin will handle manually
+    } catch (rateErr) {
+      console.error("Live shipping rate calculation failed:", rateErr.message);
     }
 
     // Stripe line items
@@ -508,22 +352,22 @@ exports.stripeSession = async (req, res) => {
 
     const stripeCustomer = await stripe.customers.create({
       email: customer.email,
-      name: customer.fullName,
+      name: shippingAddress.fullName || customer.fullName,
       address: {
-        line1: customer.billingStreet || "123 Main St",
-        city: customer.billingCity || "City",
-        state: customer.billingState || "CA",
-        postal_code: customer.billingZip || "90001",
-        country: customer.billingCountry || "US",
+        line1: billingAddress.address1 || shippingAddress.address1 || customer.billingStreet || "123 Main St",
+        city: billingAddress.city || shippingAddress.city || customer.billingCity || "City",
+        state: billingAddress.state || shippingAddress.state || customer.billingState || "CA",
+        postal_code: billingAddress.zip || shippingAddress.zip || customer.billingZip || "90001",
+        country: billingAddress.country || shippingAddress.country || customer.billingCountry || "US",
       },
       shipping: {
-        name: customer.fullName,
+        name: shippingAddress.fullName || customer.fullName,
         address: {
-          line1: customer.commercialStreet || customer.billingStreet || "123 Main St",
-          city: customer.commercialCity || customer.billingCity || "City",
-          state: customer.commercialState || customer.billingState || "CA",
-          postal_code: customer.commercialZip || customer.billingZip || "90001",
-          country: customer.commercialCountry || customer.billingCountry || "US",
+          line1: shippingAddress.address1 || customer.commercialStreet || customer.billingStreet || "123 Main St",
+          city: shippingAddress.city || customer.commercialCity || customer.billingCity || "City",
+          state: shippingAddress.state || customer.commercialState || customer.billingState || "CA",
+          postal_code: shippingAddress.zip || customer.commercialZip || customer.billingZip || "90001",
+          country: shippingAddress.country || customer.commercialCountry || customer.billingCountry || "US",
         },
       },
     });
@@ -543,6 +387,8 @@ exports.stripeSession = async (req, res) => {
         shippingCost: shippingCost.toString(),
         serviceLevel: selectedRate?.servicelevel?.token || "",
         serviceName: selectedRate?.servicelevel?.name || "Flat Rate",
+        shippingAddress: JSON.stringify(shippingAddress),
+        billingAddress: JSON.stringify(billingAddress),
       },
       success_url: `https://clubpromfg.com/greengrass/`,
       cancel_url: `https://clubpromfg.com/greengrass/`,

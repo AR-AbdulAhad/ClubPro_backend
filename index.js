@@ -39,6 +39,7 @@ const statsRoutes = require("./src/routes/statsRoutes");
 const seoRoutes = require("./src/routes/seoRoutes");
 const heroSectionRoutes = require("./src/routes/heroSectoinRoutes");
 const dimeRoutes = require("./src/routes/dimeRoutes");
+const shippingRoutes = require("./src/routes/shippingRoutes");
 
 
 
@@ -113,6 +114,7 @@ app.use("/api", heroSectionRoutes);
 app.use("/api", orderRoutes);
 app.use("/api", warrantyRoutes);
 app.use("/api", dimeRoutes);
+app.use("/api/shipping", shippingRoutes);
 
 
 

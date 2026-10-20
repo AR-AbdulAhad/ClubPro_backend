@@ -184,6 +184,19 @@ const updateProduct = async (req, res) => {
       include: { brand: { select: { name: true } }, model: { select: { name: true } }, productType: { select: { name: true } } },
     });
 
+    // Sync updated product with Fishbowl
+    try {
+      const fbResult = await fishbowl.syncProduct(updatedProduct);
+      if (fbResult?.partNumber && !updatedProduct.fishbowlPartNumber) {
+        await prisma.product.update({
+          where: { id: updatedProduct.id },
+          data: { fishbowlPartNumber: fbResult.partNumber },
+        });
+      }
+    } catch (fbErr) {
+      console.warn(`[Fishbowl Sync Warning] Failed to update product ${updatedProduct.id} in Fishbowl:`, fbErr.message);
+    }
+
     res.status(200).json({ message: "Product updated", product: updatedProduct });
   } catch (error) {
     console.error("Update product error:", error);
