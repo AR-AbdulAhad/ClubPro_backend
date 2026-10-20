@@ -39,6 +39,7 @@ const statsRoutes = require("./src/routes/statsRoutes");
 const seoRoutes = require("./src/routes/seoRoutes");
 const heroSectionRoutes = require("./src/routes/heroSectoinRoutes");
 const catalogSyncRoutes = require("./src/routes/catalogSyncRoutes");
+const dimeRoutes = require("./src/routes/dimeRoutes");
 
 
 
@@ -113,6 +114,7 @@ app.use("/api", catalogSyncRoutes);
 
 app.use("/api", orderRoutes);
 app.use("/api", warrantyRoutes);
+app.use("/api", dimeRoutes);
 
 
 

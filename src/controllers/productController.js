@@ -3,7 +3,8 @@ const { put, del } = require("@vercel/blob");
 const prisma = new PrismaClient();
 const path = require("path");
 const fs = require("fs");
-// const fishbowl = require('../services/fishbowlService');
+const fishbowl = require("../services/fishbowlService");
+
 // ==================== CREATE PRODUCT ====================
 const createProduct = async (req, res) => {
   try {
@@ -87,6 +88,21 @@ const createProduct = async (req, res) => {
       },
       include: { brand: { select: { name: true } }, model: { select: { name: true } }, productType: { select: { name: true } } },
     });
+
+    // ─── Sync with Fishbowl ───
+    try {
+      const fbResult = await fishbowl.syncProduct(product);
+      if (fbResult?.partNumber) {
+        await prisma.product.update({
+          where: { id: product.id },
+          data: { fishbowlPartNumber: fbResult.partNumber },
+        });
+        product.fishbowlPartNumber = fbResult.partNumber;
+        console.log(`[Fishbowl Sync] Product ${product.id} successfully synced as part "${fbResult.partNumber}"`);
+      }
+    } catch (fbErr) {
+      console.error(`[Fishbowl Sync Warning] Failed to sync product ${product.id} to Fishbowl:`, fbErr.message);
+    }
 
     res.status(201).json({ message: "Product created", product });
   } catch (error) {
@@ -190,9 +206,27 @@ const bulkDeleteProducts = async (req, res) => {
       return res.status(400).json({ message: "Product IDs are required" });
     }
 
-    const result = await prisma.product.deleteMany({
-      where: { id: { in: ids.map((id) => parseInt(id)) } },
+    const parsedIds = ids.map((id) => parseInt(id));
+
+    // Find products before deletion to retrieve their SKU/fishbowlPartNumber
+    const productsToDelete = await prisma.product.findMany({
+      where: { id: { in: parsedIds } },
+      select: { id: true, sku: true, fishbowlPartNumber: true },
     });
+
+    const result = await prisma.product.deleteMany({
+      where: { id: { in: parsedIds } },
+    });
+
+    // Asynchronously deactivate each product in Fishbowl
+    for (const prod of productsToDelete) {
+      const fbPartNum = prod.fishbowlPartNumber || prod.sku;
+      if (fbPartNum) {
+        fishbowl.deactivateProduct(fbPartNum).catch((err) => {
+          console.error(`[Fishbowl Deactivate Error for ${fbPartNum}]:`, err.message);
+        });
+      }
+    }
 
     res.status(200).json({
       message: `Deleted ${result.count} product(s) successfully`,
@@ -569,6 +603,7 @@ const importProductsFromCSV = async (req, res) => {
     });
   }
 };
+
 
 module.exports = {
   importProductsFromCSV,
