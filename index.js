@@ -38,6 +38,7 @@ const warrantyRoutes = require("./src/routes/warrantyRoutes");
 const statsRoutes = require("./src/routes/statsRoutes");
 const seoRoutes = require("./src/routes/seoRoutes");
 const heroSectionRoutes = require("./src/routes/heroSectoinRoutes");
+const catalogSyncRoutes = require("./src/routes/catalogSyncRoutes");
 const dimeRoutes = require("./src/routes/dimeRoutes");
 const shippingRoutes = require("./src/routes/shippingRoutes");
 
@@ -108,6 +109,7 @@ app.use("/api", contactRoutes);
 app.use("/api", statsRoutes);
 app.use("/api/seo", seoRoutes);
 app.use("/api", heroSectionRoutes);
+app.use("/api", catalogSyncRoutes);
 // app.use("/api", checkoutRoutes);
 
 
