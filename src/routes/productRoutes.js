@@ -9,6 +9,7 @@ const {
   getProductBySlug,
   getLatestProducts,
   importProductsFromCSV,
+  syncInventoryFromFishbowl,
   // toggleProductField,
 } = require('../controllers/productController');
 
@@ -37,6 +38,10 @@ router.post('/bulk-delete-products', authenticateToken, bulkDeleteProducts);
 router.put('/product/:id', authenticateToken, upload.productNamedImages, updateProduct);
 
 router.post("/products/import-csv", importProductsFromCSV);
+
+// Fishbowl Inventory Sync routes
+router.post('/products/sync-inventory', syncInventoryFromFishbowl);
+router.post('/products/:id/sync-inventory', syncInventoryFromFishbowl);
 
 
 // Toggle stock (or any simple field)

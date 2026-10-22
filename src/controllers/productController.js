@@ -93,12 +93,21 @@ const createProduct = async (req, res) => {
     try {
       const fbResult = await fishbowl.syncProduct(product);
       if (fbResult?.partNumber) {
+        product.fishbowlPartNumber = fbResult.partNumber;
+
+        // Automatically pull current inventory from Fishbowl if it already exists there
+        const fbStock = await fishbowl.getPartInventory(fbResult.partNumber);
+        const updateData = { fishbowlPartNumber: fbResult.partNumber };
+        if (fbStock !== null) {
+          updateData.stock = fbStock;
+          product.stock = fbStock;
+        }
+
         await prisma.product.update({
           where: { id: product.id },
-          data: { fishbowlPartNumber: fbResult.partNumber },
+          data: updateData,
         });
-        product.fishbowlPartNumber = fbResult.partNumber;
-        console.log(`[Fishbowl Sync] Product ${product.id} successfully synced as part "${fbResult.partNumber}"`);
+        console.log(`[Fishbowl Sync] Product ${product.id} successfully synced as part "${fbResult.partNumber}" (Current Stock: ${product.stock})`);
       }
     } catch (fbErr) {
       console.error(`[Fishbowl Sync Warning] Failed to sync product ${product.id} to Fishbowl:`, fbErr.message);
@@ -617,6 +626,74 @@ const importProductsFromCSV = async (req, res) => {
   }
 };
 
+// ==================== SYNC INVENTORY FROM FISHBOWL ====================
+const syncInventoryFromFishbowl = async (req, res) => {
+  try {
+    const singleId = req.params.id || req.body.productId || req.query.id;
+
+    const where = singleId
+      ? { id: parseInt(singleId, 10) }
+      : {
+          OR: [
+            { sku: { not: null } },
+            { fishbowlPartNumber: { not: null } },
+          ],
+        };
+
+    const products = await prisma.product.findMany({
+      where,
+      select: { id: true, name: true, sku: true, fishbowlPartNumber: true, stock: true },
+    });
+
+    if (products.length === 0) {
+      return res.status(404).json({ success: false, message: "No matching products found to sync." });
+    }
+
+    const results = [];
+    let updatedCount = 0;
+    let fbUnreachable = false;
+
+    for (const prod of products) {
+      const partNumber = prod.fishbowlPartNumber || prod.sku;
+      if (!partNumber) continue;
+
+      if (fbUnreachable) {
+        results.push({ id: prod.id, name: prod.name, partNumber, stock: prod.stock, status: "SKIPPED_FB_UNREACHABLE" });
+        continue;
+      }
+
+      try {
+        const liveQty = await fishbowl.getPartInventory(partNumber);
+        if (liveQty !== null && liveQty !== prod.stock) {
+          await prisma.product.update({
+            where: { id: prod.id },
+            data: { stock: liveQty },
+          });
+          results.push({ id: prod.id, name: prod.name, partNumber, oldStock: prod.stock, newStock: liveQty, status: "UPDATED" });
+          updatedCount++;
+        } else if (liveQty !== null) {
+          results.push({ id: prod.id, name: prod.name, partNumber, stock: liveQty, status: "UP_TO_DATE" });
+        } else {
+          results.push({ id: prod.id, name: prod.name, partNumber, stock: prod.stock, status: "SKIPPED_NOT_FOUND_OR_OFFLINE" });
+        }
+      } catch (err) {
+        fbUnreachable = true; // Avoid slow timeouts for all subsequent products if Fishbowl server is down
+        results.push({ id: prod.id, name: prod.name, partNumber, error: err.message, status: "ERROR_FB_OFFLINE" });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Inventory sync complete. Updated ${updatedCount} product(s).`,
+      totalChecked: products.length,
+      updatedCount,
+      results,
+    });
+  } catch (err) {
+    console.error("Fishbowl inventory sync error:", err);
+    return res.status(500).json({ success: false, message: "Failed to sync inventory from Fishbowl", error: err.message });
+  }
+};
 
 module.exports = {
   importProductsFromCSV,
@@ -627,5 +704,6 @@ module.exports = {
   getProductById,
   getProductBySlug,
   getLatestProducts,
-  toggleProductStock, // renamed for clarity
+  toggleProductStock,
+  syncInventoryFromFishbowl,
 };

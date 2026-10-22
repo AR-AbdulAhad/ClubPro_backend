@@ -69,21 +69,28 @@ exports.dimeCharge = async (req, res) => {
       return res.status(404).json({ success: false, message: "Customer not found" });
     }
 
-    // ── Stock check ───────────────────────────────────────────────────────────
-    const productIds = parsedItems.map((i) => Number(i.id));
+    // ── Stock check (consolidating quantities by product) ───────────────────
+    const requestedQtyByProduct = {};
+    for (const item of parsedItems) {
+      const pId = Number(item.id);
+      requestedQtyByProduct[pId] = (requestedQtyByProduct[pId] || 0) + item.qty;
+    }
+
+    const productIds = Object.keys(requestedQtyByProduct).map(Number);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
     });
 
-    for (const item of parsedItems) {
-      const product = products.find((p) => p.id === Number(item.id));
+    for (const [pIdStr, totalQty] of Object.entries(requestedQtyByProduct)) {
+      const pId = Number(pIdStr);
+      const product = products.find((p) => p.id === pId);
       if (!product) {
-        return res.status(400).json({ success: false, message: `Product ${item.id} not found` });
+        return res.status(400).json({ success: false, message: `Product #${pId} not found` });
       }
-      if (product.stock < item.qty) {
+      if (product.stock < totalQty) {
         return res.status(400).json({
           success: false,
-          message: `Insufficient stock for "${product.name}"`,
+          message: `Insufficient stock for "${product.name}". Available: ${product.stock}, Requested: ${totalQty}`,
         });
       }
     }
@@ -241,10 +248,10 @@ exports.dimeCharge = async (req, res) => {
         }
 
         // 3. Decrement stock
-        for (const item of parsedItems) {
+        for (const [pIdStr, totalQty] of Object.entries(requestedQtyByProduct)) {
           await tx.product.update({
-            where: { id: Number(item.id) },
-            data:  { stock: { decrement: item.qty } },
+            where: { id: Number(pIdStr) },
+            data:  { stock: { decrement: totalQty } },
           });
         }
       }, { timeout: 30000 });

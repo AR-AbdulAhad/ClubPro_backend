@@ -67,26 +67,33 @@ export const authorizePayment = async (req, res) => {
             },
           });
 
-          // 2️⃣ Decrement stock
+          // 2️⃣ Decrement stock (consolidating quantities by product)
+          const requestedQtyByProduct = {};
           for (const item of items) {
+            const pId = Number(item.id);
+            requestedQtyByProduct[pId] = (requestedQtyByProduct[pId] || 0) + item.qty;
+          }
+
+          for (const [pIdStr, totalQty] of Object.entries(requestedQtyByProduct)) {
+            const pId = Number(pIdStr);
             const product = await tx.product.findUnique({
-              where: { id: item.id },
+              where: { id: pId },
             });
 
             if (!product) {
-              throw new Error(`Product ${item.id} not found`);
+              throw new Error(`Product ${pId} not found`);
             }
 
-            if (product.stock < item.qty) {
+            if (product.stock < totalQty) {
               throw new Error(
-                `Not enough stock for ${product.name}`
+                `Not enough stock for ${product.name}. Available: ${product.stock}, Requested: ${totalQty}`
               );
             }
 
             await tx.product.update({
-              where: { id: item.id },
+              where: { id: pId },
               data: {
-                stock: { decrement: item.qty },
+                stock: { decrement: totalQty },
               },
             });
           }

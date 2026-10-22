@@ -97,10 +97,10 @@ class FishbowlService {
       const res = await axios(config);
       return res.data;
     } catch (err) {
-      if (err.response?.status === 401) {
+      if (err.response?.status === 401 && !customHeaders._isRetry) {
         console.log('[Fishbowl] Token expired, re-logging in...');
         this.token = null;
-        return this.request(method, endpoint, data, customHeaders);
+        return this.request(method, endpoint, data, { ...customHeaders, _isRetry: true });
       }
 
       console.error('[Fishbowl API Error]', {
@@ -311,6 +311,15 @@ class FishbowlService {
         );
       }
 
+      // Add Shipping charge line item (Client SOP: "shipping charge follows with the order from start to finish")
+      const shipmentCostNum = parseFloat(order.shipmentCost || 0);
+      if (shipmentCostNum > 0) {
+        const shipCost = shipmentCostNum.toFixed(2);
+        rows.push(
+          `"${soNum}","${customerName}","${dateStr}","${billToName}","${billToAddress}","${billToCity}","${billToState}","${billToZip}","${billToCountry}","${shipToName}","${shipToAddress}","${shipToCity}","${shipToState}","${shipToZip}","${shipToCountry}","Shipping","Shipping & Handling","1","${shipCost}","ea"`
+        );
+      }
+
       if (rows.length === 0) {
         console.warn('[Fishbowl] No line items found for order:', order.id);
         return null;
@@ -353,6 +362,25 @@ class FishbowlService {
         success: false,
         message: err.message,
       };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 5. Get Inventory Stock for a Part from Fishbowl
+  // ─────────────────────────────────────────────────────────────
+  async getPartInventory(partNumber) {
+    if (!partNumber || !this.isConfigured()) return null;
+    try {
+      const res = await this.request('GET', `/api/parts/inventory?number=${encodeURIComponent(partNumber)}`);
+      // Fishbowl API returns results array with quantity or on-hand
+      const qty = res?.results?.[0]?.quantity ?? res?.quantity ?? res?.qtyOnHand ?? res?.results?.[0]?.qtyOnHand;
+      if (qty !== undefined && qty !== null && !isNaN(Number(qty))) {
+        return Math.max(0, parseInt(qty, 10));
+      }
+      return null;
+    } catch (err) {
+      console.warn(`[Fishbowl Inventory Warning] Could not fetch stock for "${partNumber}":`, err.response?.data || err.message);
+      return null;
     }
   }
 }
